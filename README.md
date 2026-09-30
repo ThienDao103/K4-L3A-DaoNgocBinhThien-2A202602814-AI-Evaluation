@@ -36,15 +36,27 @@ Hạn nộp mặc định: **23h59 ngày lab (GMT+7)**; coach có thể gia hạ
 
 ## Yêu cầu & Quick Start
 
-**Yêu cầu:** Python 3.11 trở lên. Cần **OpenAI API key** để chạy `domain_assistant.py` (Part 3 — sinh 20 actual answers từ RAG thật); phần code core (`template.py`, Part 1–2) không cần API key.
+**Yêu cầu:** Python 3.11 trở lên. Cần API key của provider được chọn để chạy `domain_assistant.py` (Part 3 — sinh 20 actual answers từ RAG thật); cấu hình hiện tại dùng **Gemini** qua `GEMINI_API_KEY` và `GEMINI_MODEL`. Phần code core (`template.py`, Part 1–2) không cần API key.
 
 ```bash
 python --version                                        # xác nhận Python 3.11+
 python -m venv .venv && source .venv/bin/activate       # Windows: .venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 pytest tests/ -v                                         # baseline: 42 tests collected, 42 failed
-cp .env.example .env                                     # điền OPENAI_API_KEY (chỉ cần cho Part 3)
+cp .env.example .env                                     # điền GEMINI_API_KEY (chỉ cần cho Part 3)
 ```
+
+Cấu hình mặc định dùng Gemini:
+
+```dotenv
+AI_PROVIDER=gemini
+GEMINI_API_KEY=<GEMINI_API_KEY_CUA_BAN>
+GEMINI_MODEL=gemini-2.5-flash
+```
+
+`domain_assistant.py` gọi Gemini qua HTTPS bằng thư viện chuẩn Python; không
+cần cài thêm SDK Gemini. Có thể dùng OpenAI fallback bằng cách đặt
+`AI_PROVIDER=openai`, `OPENAI_API_KEY` và `OPENAI_MODEL`.
 
 Chi tiết hướng dẫn theo hệ điều hành và xử lý lỗi: xem [`guide_lab.md`](guide_lab.md).
 

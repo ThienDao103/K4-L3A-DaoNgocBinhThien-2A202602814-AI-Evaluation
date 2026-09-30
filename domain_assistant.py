@@ -13,6 +13,9 @@ import math
 import os
 import re
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
@@ -266,6 +269,123 @@ class OpenAIGenerator:
         return answer
 
 
+class GeminiGenerator:
+    """Gemini-backed text generator with the same interface as OpenAI.
+
+    The implementation uses Gemini's HTTPS generateContent endpoint through
+    Python's standard library, so no additional SDK dependency is required.
+    No golden answers or gold contexts are passed here; callers provide only
+    the grounded prompt assembled by ``_build_prompt``.
+    """
+
+    def __init__(self, max_output_tokens: int = 300) -> None:
+        api_key = os.getenv("GEMINI_API_KEY", "").strip()
+        self.model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
+        if not api_key:
+            raise RuntimeError("GEMINI_API_KEY is missing from .env")
+        if not self.model:
+            raise RuntimeError("GEMINI_MODEL is missing from .env")
+        self.max_output_tokens = max_output_tokens
+        self.api_key = api_key
+
+    def generate(self, prompt: str) -> str:
+        model_path = urllib.parse.quote(self.model, safe="")
+        api_key = urllib.parse.quote(self.api_key, safe="")
+        endpoint = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{model_path}:generateContent?key={api_key}"
+        )
+        payload = {
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": 0,
+                "maxOutputTokens": self.max_output_tokens,
+            },
+        }
+        request = urllib.request.Request(
+            endpoint,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(request, timeout=120) as response:
+                    raw = response.read().decode("utf-8")
+                break
+            except urllib.error.HTTPError as exc:
+                # Do not include the request URL: it contains the API key.
+                body = exc.read().decode("utf-8", errors="replace")[:2000]
+                if exc.code != 429 or attempt == 2:
+                    raise RuntimeError(
+                        f"Gemini API returned HTTP {exc.code}: {body[:500]}"
+                    ) from exc
+
+                # Free-tier responses normally include "retry in N seconds".
+                # Respect it so a short rate-limit window does not discard the
+                # whole 20-case benchmark.
+                match = re.search(r"retry in\s+([0-9]+(?:\.[0-9]+)?)s", body, re.I)
+                wait_seconds = float(match.group(1)) if match else 60.0
+                time.sleep(min(max(wait_seconds + 1.0, 1.0), 180.0))
+            except urllib.error.URLError as exc:
+                raise RuntimeError(f"Gemini connection failed: {exc.reason}") from exc
+            except TimeoutError as exc:
+                raise RuntimeError("Gemini request timed out") from exc
+        else:
+            raise RuntimeError("Gemini request exhausted retry attempts")
+
+        try:
+            response_data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Gemini returned invalid JSON") from exc
+
+        candidates = response_data.get("candidates")
+        if not isinstance(candidates, list) or not candidates:
+            feedback = response_data.get("promptFeedback")
+            raise RuntimeError(
+                f"Gemini returned no candidates" + (f": {feedback}" if feedback else "")
+            )
+
+        parts = candidates[0].get("content", {}).get("parts", [])
+        answer = "".join(
+            part.get("text", "")
+            for part in parts
+            if isinstance(part, dict) and isinstance(part.get("text"), str)
+        ).strip()
+        if not answer:
+            raise RuntimeError("Gemini returned an empty answer")
+        return answer
+
+
+def _build_default_generator() -> TextGenerator:
+    """Select the configured provider without changing injected test doubles.
+
+    ``AI_PROVIDER=gemini`` is the recommended configuration. If the variable
+    is omitted, a configured Gemini key takes precedence, then a configured
+    OpenAI key is used for backwards compatibility. Explicit unsupported
+    providers fail with an actionable error instead of silently using a
+    different service.
+    """
+
+    provider = os.getenv("AI_PROVIDER", "").strip().lower()
+    if provider in {"gemini", "google", "google-gemini"}:
+        return GeminiGenerator()
+    if provider == "openai":
+        return OpenAIGenerator()
+    if provider:
+        raise RuntimeError(
+            "Unsupported AI_PROVIDER; choose 'gemini' or 'openai' in .env"
+        )
+    if os.getenv("GEMINI_API_KEY", "").strip():
+        return GeminiGenerator()
+    if os.getenv("OPENAI_API_KEY", "").strip():
+        return OpenAIGenerator()
+    raise RuntimeError(
+        "Configure AI_PROVIDER=gemini with GEMINI_API_KEY, or AI_PROVIDER=openai "
+        "with OPENAI_API_KEY, in .env"
+    )
+
+
 @dataclass(frozen=True)
 class DomainResponse:
     question: str
@@ -299,7 +419,7 @@ class DomainAssistant:
         return cls(
             corpus_id,
             BM25Retriever(chunks),
-            generator if generator is not None else OpenAIGenerator(),
+            generator if generator is not None else _build_default_generator(),
             top_k,
         )
 
